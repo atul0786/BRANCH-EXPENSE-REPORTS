@@ -123,6 +123,7 @@
   .stamp .mark.entered{color:var(--ledger-green);background:var(--ledger-green-soft);}
   .stamp .mark.pending{color:var(--stamp-red);background:var(--stamp-red-soft);}
   .stamp .mark.noexp{color:var(--slate);background:var(--paper-dim);}
+  .stamp .mark.notdue{color:var(--brass);background:var(--brass-soft);}
   .stamp .mark.ghost{color:var(--stamp-red);background:#fff;}
   .stamp{cursor:pointer;transition:.15s;}
   .stamp:hover{border-color:var(--ink);box-shadow:0 4px 14px -6px rgba(20,33,61,0.25);}
@@ -211,8 +212,10 @@
   .pill.entered{background:var(--ledger-green-soft);color:var(--ledger-green);}
   .pill.pending{background:var(--stamp-red-soft);color:var(--stamp-red);}
   .pill.noexp{background:var(--paper-dim);color:var(--slate);}
+  .pill.notdue{background:var(--brass-soft);color:var(--brass);}
   .table-scroll{max-height:480px;overflow:auto;border:1px solid var(--line);border-radius:10px;}
   .amt{font-family:'JetBrains Mono',monospace;}
+  td.num.notduecell{color:var(--brass);font-weight:600;}
 
   footer{text-align:center;font-size:11.5px;color:var(--slate);margin-top:40px;letter-spacing:.4px;}
   .badge-src{font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--slate);background:var(--paper-dim);padding:2px 7px;border-radius:5px;}
@@ -330,7 +333,7 @@
       <h2>Branch Status Summary <span class="tag">EXPENSES TRACKER · current month</span></h2>
       <div class="table-scroll" style="max-height:560px;">
         <table class="ledger" id="branchSummaryTable">
-          <thead><tr><th>Branch Name</th><th style="text-align:right;">Entered</th><th style="text-align:right;">No Expense</th><th style="text-align:right;">Pending</th><th style="text-align:right;">Grand Total</th><th style="text-align:right;">Amount</th></tr></thead>
+          <thead><tr><th>Branch Name</th><th style="text-align:right;">Entered</th><th style="text-align:right;">No Expense</th><th style="text-align:right;">Pending</th><th style="text-align:right;">Not Due</th><th style="text-align:right;">Grand Total</th><th style="text-align:right;">Amount</th></tr></thead>
           <tbody id="branchSummaryBody"></tbody>
         </table>
       </div>
@@ -372,6 +375,7 @@
           <option value="Entered">Entered</option>
           <option value="Pending">Pending</option>
           <option value="No Expense">No Expense</option>
+          <option value="Not Due">Not Due</option>
         </select>
       </div>
       <div class="table-scroll">
@@ -418,7 +422,7 @@
         </div>
         <div><label>Status</label>
           <select id="mStatus">
-            <option>Entered</option><option>Pending</option><option>No Expense</option>
+            <option>Entered</option><option>Pending</option><option>No Expense</option><option>Not Due</option>
           </select>
         </div>
         <div><label>Amount</label><input type="number" id="mAmount" placeholder="0"></div>
@@ -705,37 +709,43 @@ function rawRowsForSelectedMonth(){
 }
 
 // Builds the full branch x day grid for ONLY the selected month and fills in synthetic
-// "Pending" rows for every branch/day combo (within that month) that has no real row.
-// Branches = (branches seen in this month's real data) UNION (the master branch list).
-// The master-list union is what makes a branch that NEVER sent any data for this month
-// (e.g. BHILAI-DURG, WADI(NGP) in the source sheet) still show up as a full month of
-// Pending rows instead of silently vanishing because it has zero rows to derive itself from.
+// rows for every branch/day combo that has no real row.
+// KEY LOGIC:
+//   cutoffDate = latest date (within this month) for which ANY real entry exists across all branches.
+//   Days <= cutoffDate with no entry → "Pending"  (already elapsed, should have reported, didn't)
+//   Days >  cutoffDate               → "Not Due"  (haven't arrived yet in the data feed; can't report future)
+// If no real data exists for this month at all, cutoff is undefined → ALL gaps = "Not Due"
+//   (nothing has been submitted yet, so nothing is overdue).
 function allRows(){
   const real = rawRowsForSelectedMonth();
   const realBranchSet = new Set(real.map(r=>r.branch));
-  // master branches that aren't already present under an exact-match name this month
   const masterOnly = masterBranches.filter(mb=>!realBranchSet.has(mb));
   const branches = [...realBranchSet, ...masterOnly].filter(Boolean);
 
   if(real.length === 0 && branches.length === 0) return [];
 
-  // Need a month to build a day grid against. If there's no real data at all (so no month
-  // could be inferred from dates) but master branches exist, fall back to the currently
-  // selected month if one exists, otherwise we simply can't build a calendar grid yet.
   const ym = selectedMonth;
   if(!ym) return real;
   const [y,m] = ym.split('-').map(Number);
   const daysInMonth = new Date(y, m, 0).getDate();
+
+  // Global cutoff: the latest YYYY-MM-DD date for which any real (non-synthetic) entry exists
+  // within this month. All days after this are "Not Due" — the data feed hasn't reached them.
+  const realDatesThisMonth = real.map(r=>r.date).filter(d=>d.slice(0,7)===ym).sort();
+  const cutoffDate = realDatesThisMonth.length ? realDatesThisMonth[realDatesThisMonth.length-1] : null;
 
   const presentKey = new Set(real.map(r=>r.date+'|'+r.branch));
   const filled = [...real];
 
   for(let d=1; d<=daysInMonth; d++){
     const dateStr = ym+'-'+String(d).padStart(2,'0');
+    // Determine if this date is within the reported data range (Pending) or beyond it (Not Due)
+    const status = (!cutoffDate || dateStr > cutoffDate) ? 'Not Due' : 'Pending';
+    const sourceLabel = status === 'Not Due' ? 'Auto (future — not yet due)' : 'Auto (no entry submitted)';
     branches.forEach(b=>{
       const key = dateStr+'|'+b;
       if(!presentKey.has(key)){
-        filled.push({ date:dateStr, branch:b, status:'Pending', amount:0, category:'', source:'Auto (no entry submitted)', synthetic:true });
+        filled.push({ date:dateStr, branch:b, status, amount:0, category:'', source:sourceLabel, synthetic:true });
         presentKey.add(key);
       }
     });
@@ -1002,8 +1012,8 @@ function showMsg(id, type, text){
 /* ---------- RENDER ---------- */
 function renderAll(){
   populateMonthSelect();
-  const real = rawRowsForSelectedMonth(); // actual rows for the SELECTED month only, no filled-in Pending gaps
-  const rows = allRows();                 // full branch x day grid for that same month, gaps = Pending
+  const real = rawRowsForSelectedMonth(); // actual rows for the SELECTED month only, no filled-in gaps
+  const rows = allRows();                 // full branch x day grid: gaps within cutoff = Pending, beyond = Not Due
   document.getElementById('recordCount').textContent = real.length+' entries on record';
 
   // Hero stats
@@ -1091,15 +1101,15 @@ function drawChart(id, type, data, extraOpts){
   charts[id] = new Chart(ctx, { type, data, options: Object.assign({responsive:true, maintainAspectRatio:false}, extraOpts) });
 }
 
-// A branch counts as "never reported" for the selected month when it has ZERO Entered and
-// ZERO No Expense rows — i.e. every single day is Pending because no real data ever came in
-// for it (this is the BHILAI-DURG / WADI(NGP) case from the source Excel: 0 / 0 / 31 / 31).
-// Only meaningful when the branch actually has day rows to look at (tot>0); an empty array
-// (e.g. master branch with no month context yet) is not flagged.
+// A branch counts as "never reported" only if it has ZERO Entered and ZERO No Expense
+// among the rows that are actually DUE (i.e. Pending or real data — NOT "Not Due").
+// A branch that has only Not Due rows (all future dates) is NOT flagged — nothing is overdue yet.
 function isNeverReported(branchRows){
-  if(!branchRows.length) return false;
-  const entered = branchRows.filter(r=>r.status==='Entered').length;
-  const noexp = branchRows.filter(r=>r.status==='No Expense').length;
+  // Only consider rows that are within the due range (not future "Not Due" synthetic rows)
+  const dueRows = branchRows.filter(r=>r.status !== 'Not Due');
+  if(!dueRows.length) return false; // no due rows at all → nothing overdue
+  const entered = dueRows.filter(r=>r.status==='Entered').length;
+  const noexp = dueRows.filter(r=>r.status==='No Expense').length;
   return entered===0 && noexp===0;
 }
 
@@ -1111,23 +1121,29 @@ function renderStamps(rows, branches){
     const entered = br.filter(r=>r.status==='Entered').length;
     const pending = br.filter(r=>r.status==='Pending').length;
     const noexp = br.filter(r=>r.status==='No Expense').length;
+    const notdue = br.filter(r=>r.status==='Not Due').length;
     const totalAmt = br.reduce((s,r)=>s+r.amount,0);
     const tot = br.length || 1;
     const neverReported = isNeverReported(br);
-    const latestStatus = br.length ? br[br.length-1].status : 'Pending';
-    const markClass = neverReported ? 'ghost' : (latestStatus==='Entered'?'entered':latestStatus==='Pending'?'pending':'noexp');
+    // Latest status: pick from the most recent due row (not a Not Due row) so stamp label reflects actual reporting state
+    const dueRows = br.filter(r=>r.status!=='Not Due');
+    const latestStatus = dueRows.length ? dueRows[dueRows.length-1].status : (notdue > 0 ? 'Not Due' : 'Pending');
+    const markClass = neverReported ? 'ghost' : (latestStatus==='Entered'?'entered':latestStatus==='Pending'?'pending':latestStatus==='Not Due'?'notdue':'noexp');
     const markLabel = neverReported ? 'No Data' : latestStatus;
-    const pendingHot = (!neverReported && pending >= Math.round(tot*0.5)) ? ' hot' : '';
+    // "hot" = over 50% of DUE days still pending (Not Due days excluded from ratio)
+    const dueTot = (tot - notdue) || 1;
+    const pendingHot = (!neverReported && pending >= Math.round(dueTot*0.5)) ? ' hot' : '';
     const neverClass = neverReported ? ' never-reported' : '';
     const isMaster = isInMasterList(masterBranches, b) ? '<span class="master-badge">MASTER</span>' : '';
     return `<div class="stamp${pendingHot}${neverClass}" onclick="jumpToPending(null, '${escapeJsStr(b)}')" title="Click to see pending dates for ${escapeHtml(b)}">
       <div class="mark ${markClass}">${escapeHtml(markLabel)}</div>
       <div class="bname">${escapeHtml(b)}${isMaster}</div>
-      <div class="counts"><span><b>${entered}</b> entered</span><span><b>${noexp}</b> no-exp</span><span><b class="${pending>0?'pendnum':''}">${pending}</b> pending</span></div>
+      <div class="counts"><span><b>${entered}</b> in</span><span><b>${noexp}</b> n/e</span><span><b class="${pending>0?'pendnum':''}">${pending}</b> pend</span><span style="color:var(--brass);"><b>${notdue}</b> n/d</span></div>
       <div class="bar">
         <span style="width:${entered/tot*100}%;background:var(--ledger-green)"></span>
         <span style="width:${noexp/tot*100}%;background:var(--slate)"></span>
         <span style="width:${pending/tot*100}%;background:var(--stamp-red)"></span>
+        <span style="width:${notdue/tot*100}%;background:var(--brass);opacity:0.5"></span>
       </div>
       <div style="margin-top:8px;font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--ink);">₹${fmt(totalAmt)}</div>
     </div>`;
@@ -1136,23 +1152,24 @@ function renderStamps(rows, branches){
   renderBranchSummary(rows, branches);
 }
 
-// Excel-style summary table: Branch Name | Entered | No Expense | Pending | Grand Total | Amount
+// Excel-style summary table: Branch Name | Entered | No Expense | Pending | Not Due | Grand Total | Amount
 function renderBranchSummary(rows, branches){
   const tbody = document.getElementById('branchSummaryBody');
   if(!tbody) return;
   const tagEl = document.querySelector('#view-branches h2 .tag');
   if(tagEl) tagEl.textContent = selectedMonth ? monthLabel(selectedMonth).toUpperCase() : 'NO MONTH SELECTED';
-  if(branches.length===0){ tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--slate);padding:24px;">No data yet</td></tr>'; return; }
+  if(branches.length===0){ tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--slate);padding:24px;">No data yet</td></tr>'; return; }
 
-  let gEntered=0, gNoexp=0, gPending=0, gTotal=0, gAmt=0;
+  let gEntered=0, gNoexp=0, gPending=0, gNotDue=0, gTotal=0, gAmt=0;
   const lines = branches.slice().sort().map(b=>{
     const br = rows.filter(r=>r.branch===b);
     const entered = br.filter(r=>r.status==='Entered').length;
     const noexp = br.filter(r=>r.status==='No Expense').length;
     const pending = br.filter(r=>r.status==='Pending').length;
+    const notdue = br.filter(r=>r.status==='Not Due').length;
     const tot = br.length;
     const amt = br.reduce((s,r)=>s+r.amount,0);
-    gEntered+=entered; gNoexp+=noexp; gPending+=pending; gTotal+=tot; gAmt+=amt;
+    gEntered+=entered; gNoexp+=noexp; gPending+=pending; gNotDue+=notdue; gTotal+=tot; gAmt+=amt;
     const neverReported = isNeverReported(br);
     const rowClass = neverReported ? ' class="never-reported"' : '';
     const isMaster = isInMasterList(masterBranches, b) ? '<span class="master-badge">MASTER</span>' : '';
@@ -1161,11 +1178,12 @@ function renderBranchSummary(rows, branches){
       <td class="num">${entered}</td>
       <td class="num">${noexp}</td>
       <td class="num${pending>0?' pendcell':''}">${pending}</td>
+      <td class="num${notdue>0?' notduecell':''}">${notdue}</td>
       <td class="num">${tot}</td>
       <td class="num">₹${fmt(amt)}</td>
     </tr>`;
   }).join('');
-  const totalRow = `<tr class="grandtotal"><td>Grand Total</td><td class="num">${gEntered}</td><td class="num">${gNoexp}</td><td class="num">${gPending}</td><td class="num">${gTotal}</td><td class="num">₹${fmt(gAmt)}</td></tr>`;
+  const totalRow = `<tr class="grandtotal"><td>Grand Total</td><td class="num">${gEntered}</td><td class="num">${gNoexp}</td><td class="num">${gPending}</td><td class="num">${gNotDue}</td><td class="num">${gTotal}</td><td class="num">₹${fmt(gAmt)}</td></tr>`;
   tbody.innerHTML = lines + totalRow;
 }
 
@@ -1270,7 +1288,7 @@ function renderLedger(rows){
     return matchSearch && matchStatus;
   });
   document.getElementById('ledgerBody').innerHTML = filtered.slice(0,500).map(r=>{
-    const cls = r.status==='Entered'?'entered':r.status==='Pending'?'pending':'noexp';
+    const cls = r.status==='Entered'?'entered':r.status==='Pending'?'pending':r.status==='Not Due'?'notdue':'noexp';
     return `<tr><td>${escapeHtml(r.date)}</td><td>${escapeHtml(r.branch)}</td><td>${escapeHtml(r.category||'—')}</td><td><span class="pill ${cls}">${escapeHtml(r.status)}</span></td><td class="amt">₹${fmt(r.amount)}</td><td><span class="badge-src">${escapeHtml(r.source)}</span></td></tr>`;
   }).join('') || '<tr><td colspan="6" style="text-align:center;color:var(--slate);padding:24px;">No matching entries</td></tr>';
 }

@@ -3,10 +3,11 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Branch Ledger — Expense Tracker</title>
+<title>Expense Ledger — Branch Tracker</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <style>
@@ -259,6 +260,23 @@
     .formgrid{grid-template-columns:1fr 1fr;}
     .masterlist-grid{grid-template-columns:1fr;}
   }
+
+  /* SCREENSHOT BUTTON */
+  .btn-screenshot{
+    font-family:'Inter',sans-serif;font-weight:700;font-size:13px;
+    background:var(--brass);color:#fff;border:none;border-radius:8px;
+    padding:10px 18px;cursor:pointer;display:inline-flex;align-items:center;gap:8px;
+    transition:.15s;white-space:nowrap;box-shadow:0 2px 8px rgba(184,144,44,0.35);
+  }
+  .btn-screenshot:hover{background:#a07a20;box-shadow:0 4px 14px rgba(184,144,44,0.45);}
+  .btn-screenshot:active{transform:scale(.97);}
+  .btn-screenshot svg{flex-shrink:0;}
+  .btn-screenshot.loading{opacity:.7;cursor:wait;}
+
+  /* SCREENSHOT CANVAS TARGET */
+  #screenshotTarget{
+    background:var(--paper);font-family:'Inter',sans-serif;
+  }
 </style>
 </head>
 <body>
@@ -268,7 +286,7 @@
     <div class="brandmark">
       <div class="glyph">₹</div>
       <div>
-        <h1>Branch Ledger</h1>
+        <h1>Expense Ledger</h1>
       </div>
     </div>
     <div class="clock"><b id="clockDate">—</b><span id="recordCount">0 entries on record</span></div>
@@ -286,6 +304,10 @@
     <span class="monthbar-label">Month</span>
     <select id="monthSelect"></select>
     <span class="monthbar-hint" id="monthHint"></span>
+    <button class="btn-screenshot" id="screenshotBtn" onclick="downloadSummaryScreenshot()" title="Download Branch Status Summary as image">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="12" cy="12" r="4"/><path d="M8.5 3h7"/></svg>
+      Save as Image
+    </button>
   </div>
 
   <!-- DASHBOARD -->
@@ -348,14 +370,14 @@
   <section class="view" id="view-pending">
     <div class="grid2">
       <div class="panel">
-        <h2>Pending by Date <span class="tag"></span></h2>
+        <h2>Pending by Date <span class="tag">jis din ka jo branch pending hai</span></h2>
         <div class="row-flex" style="margin-bottom:14px;">
           <select id="pendingDateSelect" class="grow"></select>
         </div>
         <div id="pendingByDateList"></div>
       </div>
       <div class="panel">
-        <h2>Pending by Branch <span class="tag"></span></h2>
+        <h2>Pending by Branch <span class="tag">is branch ka kaunsa din pending hai</span></h2>
         <div class="row-flex" style="margin-bottom:14px;">
           <select id="pendingBranchSelect" class="grow"></select>
         </div>
@@ -392,7 +414,7 @@
 
     <div class="source-card">
       <h2>1 · Connect a published Google Sheet</h2>
-      <p class="desc">In Google Sheets: File → Share → Publish to web → choose the data tab → CSV → Publish, then paste that link here. Refresh pulls the latest rows from the sheet (your team can edit the sheet directly and it'll show up here).</p>
+      <p class="desc">In Google Sheets: <b>File → Share → Publish to web → choose the data tab → CSV → Publish</b>, then paste that link here. The app tries a direct connection first; if you're opening this file from phone storage (content:// or file://) it automatically retries through a CORS proxy — no extra steps needed. If all else fails, use the file upload option below instead.</p>
       <div class="row-flex">
         <input type="text" class="grow" id="sheetUrl" placeholder="https://docs.google.com/spreadsheets/d/e/…/pub?output=csv">
         <button class="primary" onclick="connectSheet()">Connect &amp; Sync</button>
@@ -474,7 +496,7 @@
 
   </section>
 
-  <footer>Branch Ledger — runs entirely in this page. Manual &amp; uploaded entries are saved to shared storage, visible to anyone who opens this same dashboard.</footer>
+  <footer>Expense Ledger — runs entirely in this page. Manual &amp; uploaded entries are saved to shared storage, visible to anyone who opens this same dashboard.</footer>
 </div>
 
 <script>
@@ -775,20 +797,52 @@ async function connectSheet(){
   await saveSheetUrl(url);
   await refreshSheet();
 }
+
+// Tries to fetch the CSV URL directly first.
+// If that fails with a network/CORS error (common when the file is opened from phone
+// storage as content:// or file://, or when the browser blocks cross-origin requests),
+// it automatically retries through a series of public CORS proxies.
+// Returns { text, via } on success, or throws with a combined error message.
+async function fetchWithCorsProxy(rawUrl){
+  const PROXIES = [
+    u => u,                                               // 1. direct (works in hosted/PWA context)
+    u => `https://corsproxy.io/?${encodeURIComponent(u)}`,
+    u => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
+    u => `https://thingproxy.freeboard.io/fetch/${u}`,
+  ];
+  const LABELS = ['direct','corsproxy.io','allorigins.win','thingproxy'];
+  let lastErr = '';
+  for(let i=0; i<PROXIES.length; i++){
+    const proxyUrl = PROXIES[i](rawUrl);
+    try{
+      const res = await fetch(proxyUrl, {cache:'no-store'});
+      if(!res.ok) throw new Error('HTTP '+res.status);
+      const text = await res.text();
+      // Sanity check: result should look like CSV (has commas or newlines), not an error HTML page
+      if(text.trim().startsWith('<!DOCTYPE') || text.trim().startsWith('<html'))
+        throw new Error('Got HTML page instead of CSV data');
+      if(text.trim().length < 10) throw new Error('Response too short — may be empty sheet');
+      return { text, via: LABELS[i] };
+    } catch(e){
+      lastErr += `[${LABELS[i]}: ${e.message}] `;
+    }
+  }
+  throw new Error('All fetch methods failed. Make sure the sheet is Published to web as CSV and the link is correct. Details: '+lastErr);
+}
+
 async function refreshSheet(){
   const url = document.getElementById('sheetUrl').value.trim();
   if(!url){ showMsg('sheetStatus','err','No sheet connected yet.'); return; }
-  showMsg('sheetStatus','ok','Fetching…');
+  showMsg('sheetStatus','ok','Fetching — trying direct connection…');
   try{
-    const res = await fetch(url, {cache:'no-store'});
-    if(!res.ok) throw new Error('HTTP '+res.status);
-    const text = await res.text();
+    const { text, via } = await fetchWithCorsProxy(url);
     const parsed = Papa.parse(text, {header:true, skipEmptyLines:true});
     sheetRows = dedupeByDateBranch(parsed.data.map(r=>normRow(r,'Google Sheet')).filter(Boolean));
-    showMsg('sheetStatus','ok', `Synced ${sheetRows.length} rows from Google Sheet just now.`);
+    const viaNote = via === 'direct' ? '' : ` (via ${via})`;
+    showMsg('sheetStatus','ok', `✓ Synced ${sheetRows.length} rows from Google Sheet${viaNote}.`);
     renderAll();
   }catch(e){
-    showMsg('sheetStatus','err','Could not fetch the sheet. Make sure it is Published to web as CSV and the link is public. ('+e.message+')');
+    showMsg('sheetStatus','err', e.message);
   }
 }
 
@@ -1317,6 +1371,173 @@ function renderSourceSummary(){
   if(document.getElementById('sheetUrl').value) await refreshSheet();
   renderAll();
 })();
+
+/* ─────────────────────────────────────────────────────────────
+   SCREENSHOT — Branch Status Summary as downloadable image
+   Builds a self-contained off-screen div with:
+     • Expense Ledger header + date printed
+     • Month label
+     • Data range (first real date → last real date)
+     • Full Branch Status Summary table (all rows, no scroll cap)
+   Then uses html2canvas to render it to a PNG and auto-downloads.
+───────────────────────────────────────────────────────────── */
+async function downloadSummaryScreenshot(){
+  const btn = document.getElementById('screenshotBtn');
+  if(btn.classList.contains('loading')) return;
+  btn.classList.add('loading');
+  btn.textContent = 'Generating…';
+
+  try{
+    const rows  = allRows();
+    const real  = rawRowsForSelectedMonth();
+    const branches = [...new Set(rows.map(r=>r.branch))].filter(Boolean).sort();
+    const realDates = [...new Set(real.map(r=>r.date))].sort();
+    const dateRangeStr = realDates.length
+      ? realDates[0].split('-').reverse().join('.') + ' to ' + realDates[realDates.length-1].split('-').reverse().join('.')
+      : 'No data';
+    const monthStr = selectedMonth ? monthLabel(selectedMonth) : '—';
+
+    // ── Build summary table rows data ──────────────────────
+    let gE=0,gN=0,gP=0,gND=0,gT=0,gA=0;
+    const branchData = branches.map(b=>{
+      const br = rows.filter(r=>r.branch===b);
+      const e=br.filter(r=>r.status==='Entered').length;
+      const n=br.filter(r=>r.status==='No Expense').length;
+      const p=br.filter(r=>r.status==='Pending').length;
+      const nd=br.filter(r=>r.status==='Not Due').length;
+      const t=br.length;
+      const a=br.reduce((s,r)=>s+r.amount,0);
+      const never=isNeverReported(br);
+      gE+=e;gN+=n;gP+=p;gND+=nd;gT+=t;gA+=a;
+      return{b,e,n,p,nd,t,a,never};
+    });
+
+    // ── CSS for the screenshot card ─────────────────────────
+    const css = `
+      *{box-sizing:border-box;margin:0;padding:0;}
+      body{background:#f7f4ec;font-family:'Inter',sans-serif,-apple-system,sans-serif;}
+      .card{background:#f7f4ec;padding:32px 36px 36px;width:900px;}
+      .hdr{display:flex;justify-content:space-between;align-items:flex-end;
+           border-bottom:3px double #14213d;padding-bottom:14px;margin-bottom:22px;}
+      .hdr-left{display:flex;align-items:center;gap:12px;}
+      .glyph{font-size:26px;font-weight:700;width:46px;height:46px;border:2px solid #14213d;
+             border-radius:50%;display:flex;align-items:center;justify-content:center;
+             font-family:serif;background:#f7f4ec;}
+      .title{font-size:24px;font-weight:700;color:#14213d;font-family:serif;}
+      .hdr-right{text-align:right;font-size:12px;color:#5c6370;}
+      .hdr-right b{display:block;font-size:14px;color:#14213d;}
+      .meta{margin-bottom:18px;}
+      .meta-month{font-size:22px;font-weight:700;color:#14213d;font-family:serif;margin-bottom:4px;}
+      .meta-range{font-family:monospace;font-size:13px;color:#5c6370;background:#ece6d6;
+                  display:inline-block;padding:4px 12px;border-radius:6px;letter-spacing:.5px;}
+      table{width:100%;border-collapse:collapse;font-size:13px;margin-top:4px;}
+      th{text-align:left;font-family:monospace;font-size:10.5px;text-transform:uppercase;
+         letter-spacing:1px;color:#5c6370;padding:9px 10px;border-bottom:2.5px solid #14213d;
+         background:#f7f4ec;}
+      th.r{text-align:right;}
+      td{padding:9px 10px;border-bottom:1px solid #d8d0bb;color:#14213d;}
+      td.r{text-align:right;font-family:monospace;}
+      td.red{color:#b1432f;font-weight:700;}
+      td.brass{color:#b8902c;font-weight:600;}
+      tr.never td{background:#fbe2dd;}
+      tr.never td:first-child{font-weight:700;color:#b1432f;}
+      tr.grand td{font-weight:700;border-top:2.5px solid #14213d;background:#ece6d6;}
+      .badge{font-family:monospace;font-size:9px;font-weight:700;padding:2px 5px;
+             border-radius:4px;background:#f2e6c4;color:#b8902c;margin-left:5px;vertical-align:middle;}
+      .footer{margin-top:18px;font-size:11px;color:#5c6370;text-align:center;
+              font-family:monospace;letter-spacing:.4px;}
+    `;
+
+    // ── Build HTML for screenshot card ──────────────────────
+    const tableRows = branchData.map(({b,e,n,p,nd,t,a,never})=>{
+      const nr = never ? ' class="never"' : '';
+      const isMaster = isInMasterList(masterBranches,b) ? '<span class="badge">MASTER</span>' : '';
+      return `<tr${nr}>
+        <td>${escapeHtml(b)}${isMaster}</td>
+        <td class="r">${e}</td>
+        <td class="r">${n}</td>
+        <td class="r${p>0?' red':''}">${p}</td>
+        <td class="r${nd>0?' brass':''}">${nd}</td>
+        <td class="r">${t}</td>
+        <td class="r">₹${fmt(a)}</td>
+      </tr>`;
+    }).join('');
+
+    const printedOn = new Date().toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'numeric'});
+
+    const html = `<!DOCTYPE html><html><head><meta charset="UTF-8">
+    <style>${css}</style></head><body>
+    <div class="card" id="card">
+      <div class="hdr">
+        <div class="hdr-left">
+          <div class="glyph">₹</div>
+          <div class="title">Expense Ledger</div>
+        </div>
+        <div class="hdr-right"><b>${printedOn}</b>Branch Status Summary</div>
+      </div>
+      <div class="meta">
+        <div class="meta-month">${escapeHtml(monthStr)}</div>
+        <div class="meta-range">Data range: ${escapeHtml(dateRangeStr)}</div>
+      </div>
+      <table>
+        <thead><tr>
+          <th>Branch Name</th><th class="r">Entered</th><th class="r">No Expense</th>
+          <th class="r">Pending</th><th class="r">Not Due</th>
+          <th class="r">Grand Total</th><th class="r">Amount</th>
+        </tr></thead>
+        <tbody>${tableRows}</tbody>
+        <tfoot><tr class="grand">
+          <td>Grand Total</td>
+          <td class="r">${gE}</td><td class="r">${gN}</td>
+          <td class="r">${gP}</td><td class="r">${gND}</td>
+          <td class="r">${gT}</td><td class="r">₹${fmt(gA)}</td>
+        </tr></tfoot>
+      </table>
+      <div class="footer">Generated by Expense Ledger · ${printedOn} · ${branches.length} branches · ${real.length} entries</div>
+    </div>
+    </body></html>`;
+
+    // ── Render via hidden iframe → html2canvas ──────────────
+    const iframe = document.createElement('iframe');
+    iframe.style.cssText = 'position:fixed;left:-9999px;top:-9999px;width:900px;height:1px;border:none;visibility:hidden;';
+    document.body.appendChild(iframe);
+
+    await new Promise(resolve=>{
+      iframe.onload = resolve;
+      iframe.srcdoc = html;
+    });
+
+    // Wait a tick for iframe content to fully paint
+    await new Promise(r=>setTimeout(r, 400));
+
+    const card = iframe.contentDocument.getElementById('card');
+    const canvas = await html2canvas(card, {
+      scale: 2,
+      useCORS: true,
+      backgroundColor: '#f7f4ec',
+      logging: false,
+      allowTaint: true,
+    });
+
+    document.body.removeChild(iframe);
+
+    // ── Download PNG ────────────────────────────────────────
+    const link = document.createElement('a');
+    const safMonth = (selectedMonth || 'summary').replace(/[^a-zA-Z0-9\-]/g,'_');
+    link.download = `BranchLedger_${safMonth}_${new Date().toISOString().slice(0,10)}.png`;
+    link.href = canvas.toDataURL('image/png');
+    link.click();
+
+    btn.classList.remove('loading');
+    btn.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="12" cy="12" r="4"/><path d="M8.5 3h7"/></svg> Save as Image`;
+
+  }catch(err){
+    console.error('Screenshot error:', err);
+    btn.classList.remove('loading');
+    btn.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="12" cy="12" r="4"/><path d="M8.5 3h7"/></svg> Save as Image`;
+    alert('Screenshot failed: '+err.message+'\n\nTip: Try opening the file from a web server or GitHub Pages instead of phone storage.');
+  }
+}
 </script>
 </body>
 </html>
